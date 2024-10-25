@@ -71,7 +71,8 @@ async def get_available_voices() -> List[Dict[str, str]]:
     try:
         response = elevenlabs_client.voices.get_all()
         voices = []
-        for voice in response:
+        # The response is already a list of Voice objects
+        for voice in response.voices:  # Access the voices attribute of the response
             voice_dict = {
                 "name": voice.name,
                 "id": voice.voice_id
