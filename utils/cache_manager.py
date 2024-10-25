@@ -1,22 +1,15 @@
 import pickle
 import hashlib
 from typing import Optional, Any
-import aioredis
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 class CacheManager:
-    def __init__(self, redis_url: str = "redis://localhost"):
-        try:
-            self.redis = aioredis.from_url(
-                redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        except Exception as e:
-            logger.error(f"Redis connection error: {e}")
-            self.redis = None
+    def __init__(self):
+        self.cache = {}
+        self.ttl_map = {}
 
     def create_key(self, prefix: str, data: str) -> str:
         """Create a cache key with prefix"""
@@ -25,21 +18,25 @@ class CacheManager:
 
     async def get(self, key: str) -> Optional[Any]:
         """Retrieve item from cache"""
-        if not self.redis:
-            return None
         try:
-            data = await self.redis.get(key)
-            return pickle.loads(data.encode('latin1')) if data else None
+            if key not in self.cache:
+                return None
+            
+            # Check TTL
+            if key in self.ttl_map and datetime.now() > self.ttl_map[key]:
+                del self.cache[key]
+                del self.ttl_map[key]
+                return None
+                
+            return self.cache[key]
         except Exception as e:
             logger.error(f"Cache get error: {e}")
             return None
 
     async def set(self, key: str, value: Any, ttl: int = 86400):
         """Store item in cache"""
-        if not self.redis:
-            return
         try:
-            serialized = pickle.dumps(value).decode('latin1')
-            await self.redis.set(key, serialized, ex=ttl)
+            self.cache[key] = value
+            self.ttl_map[key] = datetime.now() + timedelta(seconds=ttl)
         except Exception as e:
             logger.error(f"Cache set error: {e}")

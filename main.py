@@ -27,7 +27,8 @@ async def process_chunks(chunks: list, voice_id: str) -> bytes:
     async def process_chunk(chunk: str) -> bytes:
         async with sem:
             enhanced = await enhance_text(chunk)
-            return await text_to_speech(enhanced, voice_id)
+            audio = await text_to_speech(enhanced, voice_id)
+            return audio if audio else b""
 
     tasks = [process_chunk(chunk) for chunk in chunks]
     total_chunks = len(tasks)
@@ -64,6 +65,10 @@ async def main():
 
     # Voice selection
     voices = await get_available_voices()
+    if not voices:
+        st.error("Failed to load voices. Please check your ElevenLabs API key.")
+        return
+        
     voice_options = {voice["name"]: voice["id"] for voice in voices}
     
     with col2:
