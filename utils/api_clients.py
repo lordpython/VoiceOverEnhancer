@@ -38,9 +38,18 @@ async def enhance_text(text: str) -> str:
     """Enhance text using OpenAI"""
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "Enhance this transcript text while maintaining its meaning:"},
+                {"role": "system", "content": '''
+                    قم بتحسين وضبط النص المستخرج بدون ان تخرج من الاطار الزمني وقم  بتحويل إلى نص يتستخدم في فيديوات التعليق الصوتي:
+                    1. اجعله مناسبًا للتعليق الصوتي
+                    2. صَحِح القواعد وعلامات الترقيم
+                    3. احتفظ بالتدفق الطبيعي
+                    4. تأكد من أنه سيكون مثيرًا للاهتمام للمستمع
+                    5. إزالة الكلمات الزائدة والتكرارات
+                    6. أضف توقفات مناسبة مع الفواصل والفترات
+                    7. تنسيق الأرقام والاختصارات للكلام
+                '''},
                 {"role": "user", "content": text}
             ]
         )
