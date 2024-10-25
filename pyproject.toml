@@ -1,0 +1,14 @@
+[project]
+name = "repl-nix-voiceoverenhancer"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "aioredis>=2.0.1",
+    "elevenlabs>=1.11.0",
+    "openai>=1.52.2",
+    "pydub>=0.25.1",
+    "python-dotenv>=1.0.1",
+    "streamlit>=1.39.0",
+    "youtube-transcript-api>=0.6.2",
+]
