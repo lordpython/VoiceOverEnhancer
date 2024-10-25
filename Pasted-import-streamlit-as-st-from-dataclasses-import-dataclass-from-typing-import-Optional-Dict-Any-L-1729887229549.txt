@@ -1,0 +1,375 @@
+import streamlit as st
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List
+from pathlib import Path
+import logging
+import re
+import os
+import json
+from datetime import datetime
+import asyncio
+import time
+from collections import deque
+import aiohttp
+import hashlib
+import aioredis
+import pickle
+import tempfile
+from pydub import AudioSegment  # To handle audio concatenation
+
+# API Clients
+import openai
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from elevenlabs import set_api_key, VoiceSettings, Voices, generate
+from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+openai.api_key = os.getenv('OPENAI_API_KEY')
+eleven_api_key = os.getenv('ELEVENLABS_API_KEY')
+set_api_key(eleven_api_key)
+
+@dataclass
+class ProcessingMetrics:
+    """Metrics for processing performance and quality"""
+    start_time: float
+    end_time: float = 0
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    quality_score: float = 0.0
+    error_count: int = 0
+    memory_usage: float = 0.0
+
+    @property
+    def duration(self) -> float:
+        """Calculate total processing duration"""
+        if self.end_time == 0:
+            return time.time() - self.start_time
+        return self.end_time - self.start_time
+
+    @property
+    def success_rate(self) -> float:
+        """Calculate processing success rate"""
+        if self.total_chunks == 0:
+            return 0.0
+        return (self.total_chunks - self.error_count) / self.total_chunks * 100
+
+@dataclass
+class ProcessingResult:
+    """Enhanced processing result with metrics"""
+    success: bool
+    data: Any = None
+    error: str = ""
+    metrics: Optional[ProcessingMetrics] = None
+    estimated_time: Optional[float] = None
+    quality_checks: Dict[str, float] = None
+
+class CacheManager:
+    """Advanced caching system with Redis backend"""
+    def __init__(self, redis_url: str = "redis://localhost"):
+        try:
+            self.redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            self.redis = None
+
+    def generate_cache_key(self, data: str) -> str:
+        """Generate unique cache key"""
+        return hashlib.md5(data.encode()).hexdigest()
+
+    async def get_cached(self, key: str) -> Optional[Any]:
+        """Retrieve cached item if valid"""
+        if not self.redis:
+            return None
+        try:
+            data = await self.redis.get(key)
+            if data:
+                return pickle.loads(data.encode('latin1'))
+            return None
+        except Exception as e:
+            logger.error(f"Redis get error: {e}")
+            return None
+
+    async def cache_item(self, key: str, content: Any, ttl: int = 86400):
+        """Cache item with TTL"""
+        if not self.redis:
+            return
+        try:
+            await self.redis.set(key, pickle.dumps(content).decode('latin1'), ex=ttl)
+        except Exception as e:
+            logger.error(f"Redis set error: {e}")
+
+class TimeEstimator:
+    """Processing time estimation"""
+    def __init__(self, window_size: int = 10):
+        self.rates = deque(maxlen=window_size)
+        self.start_time = None
+        self.last_update = None
+        self.last_progress = 0
+
+    def start(self):
+        """Start a new estimation session"""
+        self.start_time = time.time()
+        self.last_update = self.start_time
+        self.last_progress = 0
+
+    def update(self, progress: float) -> float:
+        """Update progress and estimate remaining time"""
+        if self.start_time is None:
+            self.start()
+            return 0
+
+        now = time.time()
+        elapsed = now - self.last_update
+        progress_delta = progress - self.last_progress
+
+        if progress_delta > 0:
+            rate = elapsed / progress_delta if progress_delta != 0 else 0
+            self.rates.append(rate)
+
+        self.last_update = now
+        self.last_progress = progress
+
+        if not self.rates:
+            return 0
+
+        avg_rate = sum(self.rates) / len(self.rates)
+        remaining_progress = 100 - progress
+        return remaining_progress * avg_rate
+
+    def format_time(self, seconds: float) -> str:
+        """Format time estimate as human-readable string"""
+        if seconds < 60:
+            return f"{int(seconds)} seconds"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            return f"{minutes} minutes"
+        else:
+            hours = int(seconds / 3600)
+            minutes = int((seconds % 3600) / 60)
+            return f"{hours}h {minutes}m"
+
+# Initialize Redis cache manager
+cache_manager = CacheManager()
+
+def extract_video_id(url: str) -> str:
+    """Extract video ID from YouTube URL"""
+    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11}).*"
+    match = re.search(regex, url)
+    if match:
+        return match.group(1)
+    else:
+        raise ValueError("Invalid YouTube URL")
+
+async def fetch_transcript(video_url: str) -> List[Dict[str, Any]]:
+    """Fetch transcript from YouTube or cache"""
+    video_id = extract_video_id(video_url)
+    cache_key = cache_manager.generate_cache_key(f"transcript_{video_id}")
+    cached_transcript = await cache_manager.get_cached(cache_key)
+    if cached_transcript:
+        logger.info("Transcript fetched from cache.")
+        return cached_transcript
+    else:
+        try:
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            await cache_manager.cache_item(cache_key, transcript)
+            logger.info("Transcript fetched from YouTube API and cached.")
+            return transcript
+        except TranscriptsDisabled:
+            raise ValueError("Transcripts are disabled for this video.")
+        except NoTranscriptFound:
+            raise ValueError("No transcript found for this video.")
+        except Exception as e:
+            logger.error(f"Error fetching transcript: {e}")
+            raise ValueError("Failed to fetch transcript.")
+
+async def enhance_transcript(text: str) -> str:
+    """Enhance transcript text using OpenAI API"""
+    try:
+        response = await openai.Completion.acreate(
+            engine='text-davinci-003',
+            prompt=f"Enhance the following transcript text:\n{text}",
+            max_tokens=150,
+            n=1,
+            stop=None,
+            temperature=0.7,
+        )
+        enhanced_text = response.choices[0].text.strip()
+        return enhanced_text
+    except Exception as e:
+        logger.error(f"OpenAI API error: {e}")
+        return text  # Return original text if error occurs
+
+async def text_to_speech(text: str, voice_id: str) -> bytes:
+    """Convert text to speech using ElevenLabs API"""
+    try:
+        audio = await generate.async_generate(
+            text=text,
+            voice=voice_id,
+            api_key=eleven_api_key
+        )
+        return audio
+    except Exception as e:
+        logger.error(f"ElevenLabs TTS error: {e}")
+        return b''
+
+async def process_chunk(chunk: str, voice_id: str, sem: asyncio.Semaphore) -> Optional[bytes]:
+    """Process a single text chunk"""
+    async with sem:
+        enhanced_text = await enhance_transcript(chunk)
+        if not enhanced_text:
+            return None
+        audio_data = await text_to_speech(enhanced_text, voice_id)
+        return audio_data
+
+def chunk_text(text: str, max_length: int) -> List[str]:
+    """Split text into chunks of a maximum length"""
+    words = text.split()
+    chunks = []
+    current_chunk = ''
+    for word in words:
+        if len(current_chunk) + len(word) + 1 <= max_length:
+            current_chunk += ' ' + word if current_chunk else word
+        else:
+            chunks.append(current_chunk)
+            current_chunk = word
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
+async def process_transcript(transcript: List[Dict[str, Any]], voice_id: str, progress_callback) -> Optional[bytes]:
+    """Process the entire transcript asynchronously with concurrency control"""
+    transcript_text = ' '.join([item['text'] for item in transcript])
+    chunks = chunk_text(transcript_text, max_length=500)
+    total_chunks = len(chunks)
+    progress_bar = st.progress(0)
+    estimator = TimeEstimator()
+    estimator.start()
+    audio_chunks = []
+    concurrency_limit = 5  # Limit concurrency to 5 tasks
+    sem = asyncio.Semaphore(concurrency_limit)
+
+    tasks = [asyncio.create_task(process_chunk(chunk, voice_id, sem)) for chunk in chunks]
+
+    for idx, task in enumerate(asyncio.as_completed(tasks), 1):
+        audio_data = await task
+        if audio_data:
+            audio_chunks.append(audio_data)
+        progress = (idx / total_chunks) * 100
+        remaining_time = estimator.update(progress)
+        progress_bar.progress(int(progress))
+        progress_callback(f"Estimated time remaining: {estimator.format_time(remaining_time)}")
+
+    if not audio_chunks:
+        logger.error("No audio chunks were processed successfully.")
+        return None
+
+    # Concatenate audio chunks using pydub
+    try:
+        combined = AudioSegment.empty()
+        for chunk in audio_chunks:
+            audio_segment = AudioSegment.from_file(io.BytesIO(chunk), format="mp3")
+            combined += audio_segment
+        return combined.export(format="mp3").read()
+    except Exception as e:
+        logger.error(f"Error concatenating audio: {e}")
+        return None
+
+def add_custom_css():
+    """Add custom CSS for visual enhancements"""
+    st.markdown("""
+    <style>
+    .main {
+        background-color: #f0f2f6;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+async def main():
+    add_custom_css()
+    st.title("Enhanced YouTube Transcript to Speech Processor")
+    st.markdown("Main application with all optimizations and monitoring")
+
+    # User inputs
+    video_url = st.text_input("Enter YouTube Video URL:")
+    language = st.selectbox("Select Language:", options=["English", "Spanish", "French"])
+    
+    # Fetch available voices from ElevenLabs
+    try:
+        voices = await Voices.async_get_all()
+        voice_options = [voice.name for voice in voices]
+        voice_id_map = {voice.name: voice.voice_id for voice in voices}
+    except Exception as e:
+        logger.error(f"Error fetching voices: {e}")
+        voice_options = []
+        voice_id_map = {}
+
+    if not voice_options:
+        st.error("Failed to load voices. Please check the ElevenLabs API key.")
+        return
+
+    voice_name = st.selectbox("Select Voice:", options=voice_options)
+    voice_id = voice_id_map.get(voice_name, "")
+
+    output_format = st.selectbox("Select Output Format:", options=["MP3", "WAV"])
+
+    if st.button("Process"):
+        if video_url:
+            with st.spinner("Processing..."):
+                try:
+                    transcript = await fetch_transcript(video_url)
+                    if not transcript:
+                        st.error("Transcript is empty.")
+                        return
+
+                    audio_data = await process_transcript(
+                        transcript, 
+                        voice_id, 
+                        lambda msg: st.info(msg)
+                    )
+
+                    if not audio_data:
+                        st.error("Failed to generate audio.")
+                        return
+
+                    # Save to temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{output_format.lower()}") as temp_audio_file:
+                        temp_audio_file.write(audio_data)
+                        temp_audio_file_path = temp_audio_file.name
+
+                    # Provide option to play audio
+                    st.audio(temp_audio_file_path, format=f'audio/{output_format.lower()}')
+
+                    # Provide download button
+                    with open(temp_audio_file_path, 'rb') as f:
+                        st.download_button(
+                            label='Download Audio',
+                            data=f,
+                            file_name=f"output.{output_format.lower()}",
+                            mime=f"audio/{output_format.lower()}"
+                        )
+
+                    # Clean up temporary file
+                    os.unlink(temp_audio_file_path)
+
+                except ValueError as ve:
+                    st.error(str(ve))
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {e}")
+                    logger.error(f"Unexpected error: {e}")
+        else:
+            st.error("Please enter a YouTube video URL.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
