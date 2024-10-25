@@ -52,73 +52,87 @@ async def process_chunks(chunks: list, voice_id: str, voice_settings: dict) -> b
 
 async def main():
     st.set_page_config(
-        page_title="YouTube to Speech",
+        page_title="محول نصوص يوتيوب إلى كلام",
         page_icon="🎤",
         layout="wide"
     )
 
+    # Add CSS for RTL support
+    st.markdown("""
+        <style>
+        .stTextInput, .stSelectbox, .stSlider, .stCheckbox {
+            direction: rtl;
+            text-align: right;
+        }
+        .css-1inwz65 {
+            direction: rtl;
+            text-align: right;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
     init_session_state()
 
-    st.title("YouTube Transcript to Speech Converter")
-    st.markdown("Convert YouTube video transcripts to natural speech")
+    st.title("محول نصوص يوتيوب إلى كلام")
+    st.markdown("تحويل نصوص فيديوهات يوتيوب إلى كلام طبيعي")
 
     # Input section
     col1, col2 = st.columns([2, 1])
     with col1:
         video_url = st.text_input(
-            "YouTube Video URL",
+            "رابط فيديو يوتيوب",
             placeholder="https://www.youtube.com/watch?v=..."
         )
 
     # Voice selection and settings
     voices = await get_available_voices()
     if not voices:
-        st.error("Failed to load voices. Please check your ElevenLabs API key.")
+        st.error("فشل تحميل الأصوات. يرجى التحقق من مفتاح API الخاص بك")
         return
         
     voice_options = {voice["name"]: voice["id"] for voice in voices}
     
     with col2:
         selected_voice = st.selectbox(
-            "Select Voice",
+            "اختر الصوت",
             options=list(voice_options.keys())
         )
 
     # Voice configuration section
-    st.subheader("Voice Configuration")
+    st.subheader("إعدادات الصوت")
     col3, col4, col5 = st.columns(3)
     
     with col3:
         stability = st.slider(
-            "Stability",
+            "الثبات",
             min_value=0.0,
             max_value=1.0,
             value=0.5,
-            help="Higher values make the voice more consistent but can sound monotonous"
+            help="القيم الأعلى تجعل الصوت أكثر ثباتًا ولكن قد يبدو رتيبًا"
         )
         
         style = st.slider(
-            "Style",
+            "النمط",
             min_value=0.0,
             max_value=1.0,
             value=0.0,
-            help="Higher values enhance the style and emotions but may affect coherence"
+            help="القيم الأعلى تعزز النمط والمشاعر ولكن قد تؤثر على التماسك"
         )
     
     with col4:
         similarity_boost = st.slider(
-            "Similarity Boost",
+            "تعزيز التشابه",
             min_value=0.0,
             max_value=1.0,
             value=0.75,
-            help="Higher values make the voice more similar to the original voice"
+            help="القيم الأعلى تجعل الصوت أكثر تشابهًا مع الصوت الأصلي"
         )
     
     with col5:
         speaker_boost = st.checkbox(
-            "Speaker Boost",
+            "تعزيز الصوت",
             value=True,
-            help="Enhance voice clarity and reduce background noise"
+            help="تحسين وضوح الصوت وتقليل ضوضاء الخلفية"
         )
 
     voice_settings = {
@@ -128,14 +142,14 @@ async def main():
         'speaker_boost': speaker_boost
     }
 
-    if st.button("Convert to Speech", disabled=st.session_state.processing):
+    if st.button("تحويل إلى كلام", disabled=st.session_state.processing):
         if not video_url:
-            st.error("Please enter a YouTube video URL")
+            st.error("الرجاء إدخال رابط فيديو يوتيوب")
             return
 
         st.session_state.processing = True
         try:
-            with st.spinner("Processing video transcript..."):
+            with st.spinner("جارٍ معالجة نص الفيديو..."):
                 # Fetch and process transcript
                 transcript = await fetch_transcript(video_url)
                 text = " ".join(item["text"] for item in transcript)
@@ -148,7 +162,7 @@ async def main():
                 # Display audio player and download button
                 st.audio(audio_data, format="audio/mp3")
                 st.download_button(
-                    label="Download Audio",
+                    label="تحميل الصوت",
                     data=audio_data,
                     file_name="transcript_audio.mp3",
                     mime="audio/mp3"
@@ -157,7 +171,7 @@ async def main():
         except ValueError as e:
             st.error(str(e))
         except Exception as e:
-            st.error(f"An unexpected error occurred: {str(e)}")
+            st.error(f"حدث خطأ غير متوقع: {str(e)}")
         finally:
             st.session_state.processing = False
             st.session_state.progress = 0
