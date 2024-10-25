@@ -3,6 +3,7 @@ import re
 from typing import List, Dict, Any, Optional
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from elevenlabs.client import ElevenLabs
+from elevenlabs import Voice, VoiceSettings
 from openai import OpenAI
 from config import OPENAI_API_KEY, ELEVENLABS_API_KEY
 
@@ -41,14 +42,14 @@ async def enhance_text(text: str) -> str:
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": '''
-                    قم بتحسين وضبط النص المستخرج بدون ان تخرج من الاطار الزمني وقم  بتحويل إلى نص يتستخدم في فيديوات التعليق الصوتي:
-                    1. اجعله مناسبًا للتعليق الصوتي
-                    2. صَحِح القواعد وعلامات الترقيم
-                    3. احتفظ بالتدفق الطبيعي
-                    4. تأكد من أنه سيكون مثيرًا للاهتمام للمستمع
-                    5. إزالة الكلمات الزائدة والتكرارات
-                    6. أضف توقفات مناسبة مع الفواصل والفترات
-                    7. تنسيق الأرقام والاختصارات للكلام
+                    Enhance and adjust the extracted text within the time frame and convert it to text used in voiceover videos:
+                    1. Make it suitable for voiceover
+                    2. Fix grammar and punctuation
+                    3. Maintain natural flow
+                    4. Ensure it will be interesting for the listener
+                    5. Remove redundant words and repetitions
+                    6. Add appropriate pauses with commas and periods
+                    7. Format numbers and abbreviations for speech
                 '''},
                 {"role": "user", "content": text}
             ]
@@ -60,12 +61,29 @@ async def enhance_text(text: str) -> str:
         logger.error(f"OpenAI API error: {e}")
         return text
 
-async def text_to_speech(text: str, voice_id: str) -> Optional[bytes]:
-    """Convert text to speech using ElevenLabs"""
+async def text_to_speech(
+    text: str, 
+    voice_id: str, 
+    stability: float = 0.5,
+    similarity_boost: float = 0.75,
+    style: float = 0.0,
+    use_speaker_boost: bool = True
+) -> Optional[bytes]:
+    """Convert text to speech using ElevenLabs with voice settings"""
     try:
+        voice = Voice(
+            voice_id=voice_id,
+            settings=VoiceSettings(
+                stability=stability,
+                similarity_boost=similarity_boost,
+                style=style,
+                use_speaker_boost=use_speaker_boost
+            )
+        )
+        
         audio = elevenlabs_client.generate(
             text=text,
-            voice=voice_id,
+            voice=voice,
             model="eleven_turbo_v2"
         )
         # Convert iterator to bytes
@@ -80,8 +98,7 @@ async def get_available_voices() -> List[Dict[str, str]]:
     try:
         response = elevenlabs_client.voices.get_all()
         voices = []
-        # The response is already a list of Voice objects
-        for voice in response.voices:  # Access the voices attribute of the response
+        for voice in response.voices:
             voice_dict = {
                 "name": voice.name,
                 "id": voice.voice_id
